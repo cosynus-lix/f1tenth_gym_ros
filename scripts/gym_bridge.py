@@ -10,6 +10,10 @@ from ackermann_msgs.msg import AckermannDriveStamped
 
 import message_filters
 
+from geometry_msgs.msg import PointStamped, PoseWithCovarianceStamped
+from nav_msgs.msg import OccupancyGrid
+import math
+
 from f1tenth_gym_ros.msg import RaceInfo
 
 from tf2_ros import transform_broadcaster
@@ -37,6 +41,7 @@ class GymBridge(object):
 
         self.map_path = rospy.get_param('map_path')
         self.map_img_ext = rospy.get_param('map_img_ext')
+        print(self.map_path, self.map_img_ext)
         exec_dir = rospy.get_param('executable_dir')
 
         scan_fov = rospy.get_param('scan_fov')
@@ -94,6 +99,7 @@ class GymBridge(object):
         self.opp_odom_pub = rospy.Publisher(self.opp_odom_topic, Odometry, queue_size=1)
         self.opp_ego_odom_pub = rospy.Publisher(self.opp_ego_odom_topic, Odometry, queue_size=1)
         self.info_pub = rospy.Publisher(self.race_info_topic, RaceInfo, queue_size=1)
+        self.updated_map_pub = rospy.Publisher('/map', OccupancyGrid, queue_size=1)
 
         # subs
         # self.drive_sub = rospy.Subscriber(self.ego_drive_topic, AckermannDriveStamped, self.drive_callback, queue_size=1)
@@ -102,6 +108,11 @@ class GymBridge(object):
 
         self.drive_sub = rospy.Subscriber(self.ego_drive_topic, AckermannDriveStamped, self.drive_callback, queue_size=1)
         self.opp_drive_sub = rospy.Subscriber(self.opp_drive_topic, AckermannDriveStamped, self.opp_drive_callback, queue_size=1)
+	self.add_obstacle_sub = rospy.Subscriber('/clicked_point', PointStamped, self.add_obstacle_callback, queue_size=1)
+        #self.reinit_pose_sub = rospy.Subscriber('/initialpose', PoseWithCovarianceStamped, self.reinit_pose_callback, queue_size=1)
+
+	self.map_sub = rospy.Subscriber('/map', OccupancyGrid, self.map_callback, queue_size=1)
+        self.map = None
 
         # ts = message_filters.ApproximateTimeSynchronizer([self.drive_sub, self.opp_drive_sub], 1, 0.05, allow_headerless=True)
         # ts.registerCallback(self.drive_callback)
@@ -109,6 +120,11 @@ class GymBridge(object):
         # Timer
         self.timer = rospy.Timer(rospy.Duration(0.004), self.timer_callback)
         self.drive_timer = rospy.Timer(rospy.Duration(0.01), self.drive_timer_callback)
+
+    def map_callback(self, occ_grid):
+        # load map (in this script)
+        if (self.map is None):
+            self.map = occ_grid
 
     def update_sim_state(self):
         self.ego_scan = list(self.obs['scans'][0])
@@ -156,6 +172,68 @@ class GymBridge(object):
             action = {'ego_idx': 0, 'speed': [self.ego_requested_speed, self.opp_requested_speed], 'steer': [self.ego_steer, self.opp_steer]}
             self.obs, step_reward, self.done, info = self.racecar_env.step(action)
             self.update_sim_state()
+
+    # helper functions
+    def coord_2_cell_rc(self, x, y):
+        r = (int)((y-self.map.info.origin.position.y)/self.map.info.resolution)
+        c = (int)((x-self.map.info.origin.position.x)/self.map.info.resolution)
+        return r, c
+    def cell_rc_2_coord(self, row, col):
+        x = col*self.map.info.resolution + self.map.info.origin.position.x
+        y = row*self.map.info.resolution + self.map.info.origin.position.y
+        return x, y
+    def add_obs(self, x, y): # ind):
+        obstacle_size = 3
+        row, col = self.coord_2_cell_rc(x, y)
+        map = list(self.map.data)
+        index = row*self.map.info.width + col
+        if (map[index]==100):
+            # remove old obs
+            idx_r = row
+            idx_c = col
+            while ( (row-idx_r<=2*obstacle_size+1) and (map[(int)(idx_r*self.map.info.width+col)]==100) ):
+                idx_r -= 1
+            while ( (col-idx_c<=2*obstacle_size+1) and (map[(int)(row*self.map.info.width+idx_c)]==100) ):
+                idx_c -= 1
+            center_idx_r = idx_r + 1 + obstacle_size
+            center_idx_c = idx_c + 1 + obstacle_size
+            center_x, center_y = self.cell_rc_2_coord(center_idx_r, center_idx_c)
+            print("(frontend: rviz) remove old obstable @ pos: (%0.3f, %0.3f)" % (center_x, center_y))
+            for i in range(-obstacle_size, obstacle_size+1):
+                for j in range(-obstacle_size, obstacle_size+1):
+                    current_r = (int)(center_idx_r+i);
+                    current_c = (int)(center_idx_c+j);
+                    current_ind = current_r*self.map.info.width + current_c
+                    map[current_ind] = 0
+            index = center_idx_r*self.map.info.width + center_idx_c
+            flag = 0
+        else:
+            # add new obs
+            center_x, center_y = self.cell_rc_2_coord(row, col)
+            print("(frontend: rviz) add new obstable @ pos: (%0.3f, %0.3f)" % (center_x, center_y))
+            for i in range(-obstacle_size, obstacle_size+1):
+                for j in range(-obstacle_size, obstacle_size+1):
+                    current_r = (int)(row+i);
+                    current_c = (int)(col+j);
+                    current_ind = current_r*self.map.info.width + current_c
+                    map[current_ind] = 100
+            flag = 1
+        self.map.data = map
+        return index, flag
+    # callback function for adding the obstacle (as a cirlce with radius = obstacle_size)
+    def add_obstacle_callback(self, point_msg):
+        x = point_msg.point.x
+        y = point_msg.point.y
+        print("(frontend: rviz) receive pos click-point pos: (%0.3f, %0.3f)" % (x, y))
+
+        if not (self.map is None):
+            obstacle_size = 3
+            index, flag = self.add_obs(x, y)
+
+            # visualize the obstacle, attention this function only vis in rviz,
+            self.updated_map_pub.publish(self.map)
+            # the simulator should also take into account the modification of the map, using:
+            self.racecar_env.add_obstacle([index, obstacle_size, flag])
 
     def timer_callback(self, timer):
         ts = rospy.Time.now()

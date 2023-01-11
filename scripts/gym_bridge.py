@@ -17,7 +17,7 @@ import math
 from f1tenth_gym_ros.msg import RaceInfo
 
 from tf2_ros import transform_broadcaster
-from tf.transformations import quaternion_from_euler
+from tf.transformations import quaternion_from_euler, euler_from_quaternion
 
 import numpy as np
 
@@ -51,7 +51,7 @@ class GymBridge(object):
         self.angle_inc = scan_fov / scan_beams
 
         csv_path = rospy.get_param('waypoints_path')
-        
+
         wheelbase = 0.3302
         mass= 3.47
         l_r = 0.17145
@@ -83,7 +83,7 @@ class GymBridge(object):
         # keep track of latest sim state
         self.ego_scan = list(self.obs['scans'][0])
         self.opp_scan = list(self.obs['scans'][1])
-        
+
         # keep track of collision
         self.ego_collision = False
         self.opp_collision = False
@@ -108,8 +108,9 @@ class GymBridge(object):
 
         self.drive_sub = rospy.Subscriber(self.ego_drive_topic, AckermannDriveStamped, self.drive_callback, queue_size=1)
         self.opp_drive_sub = rospy.Subscriber(self.opp_drive_topic, AckermannDriveStamped, self.opp_drive_callback, queue_size=1)
-	self.add_obstacle_sub = rospy.Subscriber('/clicked_point', PointStamped, self.add_obstacle_callback, queue_size=1)
-        #self.reinit_pose_sub = rospy.Subscriber('/initialpose', PoseWithCovarianceStamped, self.reinit_pose_callback, queue_size=1)
+        self.add_obstacle_sub = rospy.Subscriber('/clicked_point', PointStamped, self.add_obstacle_callback, queue_size=1)
+        self.reinit_pose_sub = rospy.Subscriber('/initialpose', PoseWithCovarianceStamped, self.reinit_pose_callback, queue_size=1)
+        self.reinit_idx = 0
 
 	self.map_sub = rospy.Subscriber('/map', OccupancyGrid, self.map_callback, queue_size=1)
         self.map = None
@@ -167,7 +168,7 @@ class GymBridge(object):
         self.opp_drive_published = True
 
     def drive_timer_callback(self, timer):
-        if self.ego_drive_published and self.opp_drive_published:
+        if self.ego_drive_published and self.opp_drive_published and self.reinit_idx != 1:
             # pub latest drive msg
             action = {'ego_idx': 0, 'speed': [self.ego_requested_speed, self.opp_requested_speed], 'steer': [self.ego_steer, self.opp_steer]}
             self.obs, step_reward, self.done, info = self.racecar_env.step(action)
@@ -234,6 +235,34 @@ class GymBridge(object):
             self.updated_map_pub.publish(self.map)
             # the simulator should also take into account the modification of the map, using:
             self.racecar_env.add_obstacle([index, obstacle_size, flag])
+
+    # helper function
+    def quaternion_to_angle(self, q):
+        x, y, z, w = q.x, q.y, q.z, q.w
+        roll, pitch, yaw = euler_from_quaternion((x, y, z, w))
+        return yaw
+    # handle pose messages from RViz and initialize the vehicle's pose
+    def reinit_pose_callback(self, pose_msg):
+        pose = pose_msg.pose.pose
+        x = pose.position.x
+        y = pose.position.y
+        theta = self.quaternion_to_angle(pose.orientation)
+        if (self.reinit_idx==0):
+            print "RESETTING POSE - ego vehicle"
+            print("x: %0.3f, y: %0.3f, theta: %0.3f" % (x, y, theta))
+            self.ego_pose[0] = x
+            self.ego_pose[1] = y
+            self.ego_pose[2] = theta
+
+            print("Now please set pose for the opponent vehicle...")
+        if (self.reinit_idx==1):
+            print "RESETTING POSE - opponent vehicle"
+            print("x: %0.3f, y: %0.3f, theta: %0.3f" % (x, y, theta))
+            initial_state = {'x':[self.ego_pose[0], x], 'y': [self.ego_pose[1], y], 'theta': [self.ego_pose[2], theta]}
+            self.racecar_env.reset(initial_state)
+            self.update_sim_state()
+            print("RESET DONE!\n")
+        self.reinit_idx = 1 - self.reinit_idx
 
     def timer_callback(self, timer):
         ts = rospy.Time.now()

@@ -215,26 +215,6 @@ class GymBridge(object):
         self.update_sim_state()
         print("RESET DONE!\n")
 
-    def initialize_global(self):
-        '''
-        Spread the particle distribution over the permissible region of the state space.
-        '''
-        print "GLOBAL INITIALIZATION"
-        # randomize over grid coordinate space
-        self.state_lock.acquire()
-        permissible_x, permissible_y = np.where(self.permissible_region == 1)
-        indices = np.random.randint(0, len(permissible_x), size=self.MAX_PARTICLES)
-
-        permissible_states = np.zeros((self.MAX_PARTICLES,3))
-        permissible_states[:,0] = permissible_y[indices]
-        permissible_states[:,1] = permissible_x[indices]
-        permissible_states[:,2] = np.random.random(self.MAX_PARTICLES) * np.pi * 2.0
-
-        Utils.map_to_world(permissible_states, self.map_info)
-        self.particles = permissible_states
-        self.weights[:] = 1.0 / self.MAX_PARTICLES
-        self.state_lock.release()
-
     def timer_callback(self, timer):
         ts = rospy.Time.now()
 

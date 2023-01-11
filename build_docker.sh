@@ -1,8 +1,8 @@
 #!/bin/bash
 if [ ! -d f1tenth_gym ] ; then
-    git clone https://github.com/f1tenth/f1tenth_gym
+    git clone https://github.com/cosynus-lix/f1tenth_gym
     cd f1tenth_gym
-    git checkout cpp_backend_archive
+    git checkout cpp_backend_archive_add_obstacle
     cd ../
 else
     echo f1tenth_gym exists, not cloning.
